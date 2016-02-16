@@ -1,0 +1,13 @@
+[Unit]
+Description=Flannel service
+Requires=etcd.service
+After=etcd.service
+BindsTo=etcd.service
+
+[Service]
+EnvironmentFile=-/etc/default/flanneld
+ExecStart=/opt/bin/flanneld $FLANNEL_OPTS
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
