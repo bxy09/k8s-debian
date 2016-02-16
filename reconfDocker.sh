@@ -45,15 +45,15 @@ function config_etcd {
 
 function restart_docker {
   attempt=0
-  while [[ ! -f /run/flannel/subnet.env ]]; do 
+  while [[ ! -f /run/flannel/subnet.env ]]; do
     if (( attempt > 200 )); then
-      echo "timeout waiting for /run/flannel/subnet.env" >> ~/kube/err.log 
+      echo "timeout waiting for /run/flannel/subnet.env" >> ~/kube/err.log
       exit 2
     fi
     attempt=$((attempt+1))
     sleep 3
   done
-  
+
   sudo ip link set dev docker0 down
   sudo brctl delbr docker0
 
@@ -61,7 +61,18 @@ function restart_docker {
 
   echo DOCKER_OPTS=\"${DOCKER_OPTS} -H tcp://127.0.0.1:4243 -H unix:///var/run/docker.sock \
        --bip=${FLANNEL_SUBNET} --mtu=${FLANNEL_MTU}\" > /etc/default/docker
-  sudo service docker restart
+
+  ## ensure use docker opts on service def file
+  grep DOCKER_OPTS /lib/systemd/system/docker.service
+  if [[ "$?" != 0 ]]; then
+    ## no DOCKER_OPTS in configure file
+    sudo sed -i.bak -e 's/ExecStart.*/\0 $DOCKER_OPTS/' -e '/ExecStart/i EnvironmentFile=-/etc/default/docker' /lib/systemd/system/docker.service
+    echo "Changed the docker.service for DOCKER_OPTS"
+  fi
+
+  sudo systemctl daemon-reload
+  sudo systemctl restart docker.service
+
 }
 
 if [[ $1 == "i" ]]; then
@@ -74,4 +85,4 @@ elif [[ $1 == "a" ]]; then
 else
   echo "Another arguement is required."
   exit 1
-fi 
+fi

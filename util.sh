@@ -238,6 +238,7 @@ KUBELET_OPTS="\
  --logtostderr=true \
  --cluster-dns=${3} \
  --cluster-domain=${4} \
+ --pod-infra-container-image=daocloud.io/gpx_dev/pause:0.8.0 \
  --config=${5}"
 EOF
 
@@ -304,13 +305,13 @@ function detect-nodes() {
   fi
 }
 
-# Instantiate a kubernetes cluster on ubuntu
+# Instantiate a kubernetes cluster on debian
 function kube-up() {
-  export KUBE_CONFIG_FILE=${KUBE_CONFIG_FILE:-${KUBE_ROOT}/cluster/ubuntu/config-default.sh}
+  export KUBE_CONFIG_FILE=${KUBE_CONFIG_FILE:-${KUBE_ROOT}/cluster/debian/config-default.sh}
   source "${KUBE_CONFIG_FILE}"
 
   # downloading tarball release
-  "${KUBE_ROOT}/cluster/ubuntu/download-release.sh"
+  "${KUBE_ROOT}/cluster/debian/download-release.sh"
 
   setClusterInfo
   local ii=0
@@ -334,10 +335,10 @@ function kube-up() {
   done
   wait
 
-  export KUBECTL_PATH="${KUBE_ROOT}/cluster/ubuntu/binaries/kubectl"
+  export KUBECTL_PATH="${KUBE_ROOT}/cluster/debian/binaries/kubectl"
   verify-cluster
   detect-master
-  export CONTEXT="ubuntu"
+  export CONTEXT="debian"
   export KUBE_SERVER="http://${KUBE_MASTER_IP}:8080"
 
   source "${KUBE_ROOT}/cluster/common.sh"
@@ -357,11 +358,11 @@ function provision-master() {
   # copy the binaries and scripts to the ~/kube directory on the master
   scp -r $SSH_OPTS \
     saltbase/salt/generate-cert/make-ca-cert.sh \
-    ubuntu/reconfDocker.sh \
+    debian/reconfDocker.sh \
     "${KUBE_CONFIG_FILE}" \
-    ubuntu/util.sh \
-    ubuntu/master/* \
-    ubuntu/binaries/master/ \
+    debian/util.sh \
+    debian/master/* \
+    debian/binaries/master/ \
     "${MASTER}:~/kube"
 
   EXTRA_SANS=(
@@ -396,18 +397,31 @@ function provision-master() {
     create-kube-controller-manager-opts '${NODE_IPS}'
     create-kube-scheduler-opts
     create-flanneld-opts '127.0.0.1' '${MASTER_IP}'
+
+    sudo -p '[sudo] password to start master: ' groupadd -f -r kube-cert
+    echo "Making CA Cert. This may take a long time ...."
+    ${PROXY_SETTING} sudo -p '[sudo] password to start master: ' ~/kube/make-ca-cert.sh \"${MASTER_IP}\" \"${EXTRA_SANS}\"
+    echo "Done!"
+
     FLANNEL_OTHER_NET_CONFIG='${FLANNEL_OTHER_NET_CONFIG}' sudo -E -p '[sudo] password to start master: ' -- /bin/bash -ce '
       ${BASH_DEBUG_FLAGS}
 
       cp ~/kube/default/* /etc/default/
-      cp ~/kube/init_conf/* /etc/init/
-      cp ~/kube/init_scripts/* /etc/init.d/
+      cp ~/kube/systemd/* /lib/systemd/system/
 
-      groupadd -f -r kube-cert
-      ${PROXY_SETTING} ~/kube/make-ca-cert.sh \"${MASTER_IP}\" \"${EXTRA_SANS}\"
       mkdir -p /opt/bin/
       cp ~/kube/master/* /opt/bin/
-      service etcd start
+      systemctl daemon-reload
+      systemctl enable etcd.service
+      systemctl start etcd.service
+      systemctl enable flanneld.service
+      systemctl start flanneld.service
+      systemctl enable kube-apiserver.service
+      systemctl start kube-apiserver.service
+      systemctl enable kube-controller-manager.service
+      systemctl start kube-controller-manager.service
+      systemctl enable kube-scheduler.service
+      systemctl start kube-scheduler.service
       FLANNEL_NET=\"${FLANNEL_NET}\" KUBE_CONFIG_FILE=\"${KUBE_CONFIG_FILE}\" ~/kube/reconfDocker.sh a
       '" || {
       echo "Deploying master on machine ${MASTER_IP} failed"
@@ -424,10 +438,10 @@ function provision-node() {
   # copy the binaries and scripts to the ~/kube directory on the node
   scp -r $SSH_OPTS \
     "${KUBE_CONFIG_FILE}" \
-    ubuntu/util.sh \
-    ubuntu/reconfDocker.sh \
-    ubuntu/minion/* \
-    ubuntu/binaries/minion \
+    debian/util.sh \
+    debian/reconfDocker.sh \
+    debian/minion/* \
+    debian/binaries/minion \
     "${1}:~/kube"
 
   BASH_DEBUG_FLAGS=""
@@ -450,17 +464,22 @@ function provision-node() {
       '${KUBELET_CONFIG}'
     create-kube-proxy-opts \
       '${1#*@}' \
-      '${MASTER_IP}' 
+      '${MASTER_IP}'
     create-flanneld-opts '${MASTER_IP}' '${1#*@}'
 
-    sudo -E -p '[sudo] password to start node: ' -- /bin/bash -ce '    
+    sudo -E -p '[sudo] password to start node: ' -- /bin/bash -ce '
       ${BASH_DEBUG_FLAGS}
       cp ~/kube/default/* /etc/default/
-      cp ~/kube/init_conf/* /etc/init/
-      cp ~/kube/init_scripts/* /etc/init.d/
+      cp ~/kube/systemd/* /lib/systemd/system/
       mkdir -p /opt/bin/
       cp ~/kube/minion/* /opt/bin
-      service flanneld start
+      systemctl daemon-reload
+      systemctl enable flanneld.service
+      systemctl start flanneld.service
+      systemctl enable kube-proxy.service
+      systemctl start kube-proxy.service
+      systemctl enable kubelet.service
+      systemctl start kubelet.service
       KUBE_CONFIG_FILE=\"${KUBE_CONFIG_FILE}\" ~/kube/reconfDocker.sh i
       '" || {
       echo "Deploying node on machine ${1#*@} failed"
@@ -476,15 +495,16 @@ function provision-masterandnode() {
 
   # copy the binaries and scripts to the ~/kube directory on the master
   # scp order matters
+
   scp -r $SSH_OPTS \
     saltbase/salt/generate-cert/make-ca-cert.sh \
     "${KUBE_CONFIG_FILE}" \
-    ubuntu/util.sh \
-    ubuntu/minion/* \
-    ubuntu/master/* \
-    ubuntu/reconfDocker.sh \
-    ubuntu/binaries/master/ \
-    ubuntu/binaries/minion \
+    debian/util.sh \
+    debian/minion/systemd \
+    debian/master/systemd \
+    debian/reconfDocker.sh \
+    debian/binaries/master \
+    debian/binaries/minion \
     "${MASTER}:~/kube"
 
   EXTRA_SANS=(
@@ -529,19 +549,35 @@ function provision-masterandnode() {
       '${MASTER_IP}'
     create-flanneld-opts '127.0.0.1' '${MASTER_IP}'
 
-    FLANNEL_OTHER_NET_CONFIG='${FLANNEL_OTHER_NET_CONFIG}' sudo -E -p '[sudo] password to start master: ' -- /bin/bash -ce ' 
+    sudo -p '[sudo] password to start master: ' groupadd -f -r kube-cert
+    echo "Making CA Cert. This may take a long time ...."
+    ${PROXY_SETTING} sudo -p '[sudo] password to start master: ' ~/kube/make-ca-cert.sh \"${MASTER_IP}\" \"${EXTRA_SANS}\"
+    echo "Done!"
+
+    FLANNEL_OTHER_NET_CONFIG='${FLANNEL_OTHER_NET_CONFIG}' sudo -E -p '[sudo] password to start master: ' -- /bin/bash -ce '
       ${BASH_DEBUG_FLAGS}
       cp ~/kube/default/* /etc/default/
-      cp ~/kube/init_conf/* /etc/init/
-      cp ~/kube/init_scripts/* /etc/init.d/
+      cp ~/kube/systemd/* /lib/systemd/system/
 
-      groupadd -f -r kube-cert
-      ${PROXY_SETTING} ~/kube/make-ca-cert.sh \"${MASTER_IP}\" \"${EXTRA_SANS}\"
       mkdir -p /opt/bin/
       cp ~/kube/master/* /opt/bin/
       cp ~/kube/minion/* /opt/bin/
 
-      service etcd start
+      systemctl daemon-reload
+      systemctl enable etcd.service
+      systemctl start etcd.service
+      systemctl enable flanneld.service
+      systemctl start flanneld.service
+      systemctl enable kube-apiserver.service
+      systemctl start kube-apiserver.service
+      systemctl enable kube-controller-manager.service
+      systemctl start kube-controller-manager.service
+      systemctl enable kube-scheduler.service
+      systemctl start kube-scheduler.service
+      systemctl enable kube-proxy.service
+      systemctl start kube-proxy.service
+      systemctl enable kubelet.service
+      systemctl start kubelet.service
       FLANNEL_NET=\"${FLANNEL_NET}\" KUBE_CONFIG_FILE=\"${KUBE_CONFIG_FILE}\" ~/kube/reconfDocker.sh ai
       '" || {
       echo "Deploying master and node on machine ${MASTER_IP} failed"
@@ -565,9 +601,9 @@ function check-pods-torn-down() {
 
 # Delete a kubernetes cluster
 function kube-down() {
-  export KUBECTL_PATH="${KUBE_ROOT}/cluster/ubuntu/binaries/kubectl"
-  
-  export KUBE_CONFIG_FILE=${KUBE_CONFIG_FILE:-${KUBE_ROOT}/cluster/ubuntu/config-default.sh}
+  export KUBECTL_PATH="${KUBE_ROOT}/cluster/debian/binaries/kubectl"
+
+  export KUBE_CONFIG_FILE=${KUBE_CONFIG_FILE:-${KUBE_ROOT}/cluster/debian/config-default.sh}
   source "${KUBE_CONFIG_FILE}"
 
   source "${KUBE_ROOT}/cluster/common.sh"
@@ -586,8 +622,7 @@ function kube-down() {
 
             rm -rf \
               /opt/bin/etcd* \
-              /etc/init/etcd.conf \
-              /etc/init.d/etcd \
+              /lib/systemd/system/etcd.service \
               /etc/default/etcd
 
             rm -rf /infra*
@@ -616,12 +651,12 @@ function kube-down() {
         rm -f \
           /opt/bin/kube* \
           /opt/bin/flanneld \
-          /etc/init/kube* \
-          /etc/init/flanneld.conf \
-          /etc/init.d/kube* \
-          /etc/init.d/flanneld \
+          /lib/systemd/system/kube* \
+          /lib/systemd/system/flanneld.service  \
           /etc/default/kube* \
           /etc/default/flanneld
+
+        systemctl daemon-reload
 
         rm -rf ~/kube
         rm -f /run/flannel/subnet.env
@@ -636,7 +671,7 @@ function prepare-push() {
   # Use local binaries for kube-push
   if [[ -z "${KUBE_VERSION}" ]]; then
     echo "Use local binaries for kube-push"
-    if [[ ! -d "${KUBE_ROOT}/cluster/ubuntu/binaries" ]]; then
+    if [[ ! -d "${KUBE_ROOT}/cluster/debian/binaries" ]]; then
       echo "No local binaries.Please check"
       exit 1
     else
@@ -646,20 +681,20 @@ function prepare-push() {
   else
     # Run download-release.sh to get the required release
     export KUBE_VERSION
-    "${KUBE_ROOT}/cluster/ubuntu/download-release.sh"
+    "${KUBE_ROOT}/cluster/debian/download-release.sh"
   fi
 }
 
 # Update a kubernetes master with expected release
 function push-master() {
-  export KUBE_CONFIG_FILE=${KUBE_CONFIG_FILE:-${KUBE_ROOT}/cluster/ubuntu/config-default.sh}
+  export KUBE_CONFIG_FILE=${KUBE_CONFIG_FILE:-${KUBE_ROOT}/cluster/debian/config-default.sh}
   source "${KUBE_CONFIG_FILE}"
 
-  if [[ ! -f "${KUBE_ROOT}/cluster/ubuntu/binaries/master/kube-apiserver" ]]; then
+  if [[ ! -f "${KUBE_ROOT}/cluster/debian/binaries/master/kube-apiserver" ]]; then
     echo "There is no required release of kubernetes, please check first"
     exit 1
   fi
-  export KUBECTL_PATH="${KUBE_ROOT}/cluster/ubuntu/binaries/kubectl"
+  export KUBECTL_PATH="${KUBE_ROOT}/cluster/debian/binaries/kubectl"
 
   setClusterInfo
 
@@ -672,12 +707,9 @@ function push-master() {
         service etcd stop
         sleep 3
         rm -rf \
-          /etc/init/etcd.conf \
-          /etc/init/kube* \
-          /etc/init/flanneld.conf \
-          /etc/init.d/etcd \
-          /etc/init.d/kube* \
-          /etc/init.d/flanneld \
+          /lib/systemd/system/etcd.service \
+          /lib/systemd/system/flanneld.service \
+          /lib/systemd/system/kube* \
           /etc/default/etcd \
           /etc/default/kube* \
           /etc/default/flanneld
@@ -708,15 +740,15 @@ function push-master() {
 
 # Update a kubernetes node with expected release
 function push-node() {
-  export KUBE_CONFIG_FILE=${KUBE_CONFIG_FILE:-${KUBE_ROOT}/cluster/ubuntu/config-default.sh}
+  export KUBE_CONFIG_FILE=${KUBE_CONFIG_FILE:-${KUBE_ROOT}/cluster/debian/config-default.sh}
   source "${KUBE_CONFIG_FILE}"
 
-  if [[ ! -f "${KUBE_ROOT}/cluster/ubuntu/binaries/minion/kubelet" ]]; then
+  if [[ ! -f "${KUBE_ROOT}/cluster/debian/binaries/minion/kubelet" ]]; then
     echo "There is no required release of kubernetes, please check first"
     exit 1
   fi
 
-  export KUBECTL_PATH="${KUBE_ROOT}/cluster/ubuntu/binaries/kubectl"
+  export KUBECTL_PATH="${KUBE_ROOT}/cluster/debian/binaries/kubectl"
 
   setClusterInfo
 
@@ -735,10 +767,8 @@ function push-node() {
             /opt/bin/flanneld
 
           rm -rf \
-            /etc/init/kube* \
-            /etc/init/flanneld.conf \
-            /etc/init.d/kube* \
-            /etc/init.d/flanneld \
+            /lib/systemd/system/flanneld.service \
+            /lib/systemd/system/kube* \
             /etc/default/kube* \
             /etc/default/flanneld
 
@@ -771,15 +801,15 @@ function push-node() {
 # Update a kubernetes cluster with expected source
 function kube-push() {
   prepare-push
-  export KUBE_CONFIG_FILE=${KUBE_CONFIG_FILE:-${KUBE_ROOT}/cluster/ubuntu/config-default.sh}
+  export KUBE_CONFIG_FILE=${KUBE_CONFIG_FILE:-${KUBE_ROOT}/cluster/debian/config-default.sh}
   source "${KUBE_CONFIG_FILE}"
 
-  if [[ ! -f "${KUBE_ROOT}/cluster/ubuntu/binaries/master/kube-apiserver" ]]; then
+  if [[ ! -f "${KUBE_ROOT}/cluster/debian/binaries/master/kube-apiserver" ]]; then
     echo "There is no required release of kubernetes, please check first"
     exit 1
   fi
 
-  export KUBECTL_PATH="${KUBE_ROOT}/cluster/ubuntu/binaries/kubectl"
+  export KUBECTL_PATH="${KUBE_ROOT}/cluster/debian/binaries/kubectl"
   #stop all the kube's process & etcd
   local ii=0
   for i in ${nodes}; do
@@ -792,8 +822,7 @@ function kube-push() {
 
           rm -rf \
             /opt/bin/etcd* \
-            /etc/init/etcd.conf \
-            /etc/init.d/etcd \
+            /lib/systemd/system/etcd.service \
             /etc/default/etcd
         '" || echo "Cleaning on master ${i#*@} failed"
       elif [[ "${roles[${ii}]}" == "i" ]]; then
@@ -813,10 +842,8 @@ function kube-push() {
           /opt/bin/flanneld
 
         rm -rf \
-          /etc/init/kube* \
-          /etc/init/flanneld.conf \
-          /etc/init.d/kube* \
-          /etc/init.d/flanneld \
+          /lib/systemd/system/flanneld.service \
+          /lib/systemd/system/kube* \
           /etc/default/kube* \
           /etc/default/flanneld
 
@@ -848,5 +875,5 @@ function kube-push() {
 
 # Perform preparations required to run e2e tests
 function prepare-e2e() {
-  echo "Ubuntu doesn't need special preparations for e2e tests" 1>&2
+  echo "debian doesn't need special preparations for e2e tests" 1>&2
 }

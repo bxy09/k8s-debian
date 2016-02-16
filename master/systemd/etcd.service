@@ -1,0 +1,13 @@
+[Unit]
+Description=Etcd service
+Requires=network.target local-fs.target
+After=network.target local-fs.target
+
+[Service]
+Type=notify
+EnvironmentFile=-/etc/default/etcd
+ExecStart=/opt/bin/etcd $ETCD_OPTS
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
